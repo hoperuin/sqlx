@@ -184,4 +184,162 @@ func main() {
     rows, err = db.NamedQuery(`SELECT * FROM person WHERE first_name=:first_name`, jason)
 }
 ```
+### usage(new)
+```go
+package main
+
+import (
+	"log"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/hoperuin/sqlx"
+)
+
+var (
+	db *sqlx.DB
+)
+
+func init() {
+	_db, err := sqlx.Open("mysql", "user:password@tcp(host:port)/test?charset=utf8&parseTime=true")
+	if err != nil {
+		log.Fatal(err)
+	}
+	db = _db
+}
+
+//单表查询
+type Test struct {
+	A int    `db:"A,where=A"`
+	B string `db:"B"`
+}
+
+//多表联合1
+type TestA struct {
+	Table string `table:"test" pk:"A"`
+	A     int    `db:"A,where=test.A"`
+	B     string `db:"B"`
+	Name  string `db:"name,table=test_join" fk:"test_id"`
+}
+
+//多表联合2
+type TestB struct {
+	Table string `table:"test" pk:"A"`
+	A     int    `db:"A,where=test.A"`
+	B     string `db:"B"`
+	TestJoin
+}
+
+type TestJoin struct {
+	Table string `table:"test_join" pk:"id" fk:"test_id"`
+	Name  string `db:"name"`
+}
+
+type TestC struct {
+	Table   string `table:"test_c" fk:"join_id"`
+	Address string `db:"address"`
+}
+
+type TestD struct {
+	Table   string `table:"test" pk:"A"`
+	A       int    `db:"A,where=test.A"`
+	B       string `db:"B"`
+	Name    string `db:"name,table=test_join" pk:"id" fk:"test_id"`
+	Address string `db:"address,table=test_c" fk:"join_id"`
+}
+
+//多表联合4
+type TestE struct {
+	Table string `table:"test" pk:"A"`
+	A     int    `db:"A,where=test.A"`
+	B     string `db:"B"`
+	TestJoin
+	TestC
+}
+
+//
+type TestF struct {
+	Table string `sql:"select * from test where A = ? "`
+	A     int    `db:"A"`
+	B     string `db:"B"`
+}
+
+type TestG struct {
+	Table string `sql:"select * from test"`
+	A     int    `db:"A"`
+	B     string `db:"B"`
+}
+
+func SingleTableQuery() {
+	t := Test{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func SingleTableQuery1() {
+	t := TestF{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func SingleTableQuery2() {
+	t := []TestG{}
+	err := db.Selectx(&t)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func JoinTableQuery() {
+	t := TestA{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func JoinTableQuery2() {
+	t := TestB{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func JoinTableQuery3() {
+	t := TestD{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func JoinTableQuery4() {
+	t := TestE{}
+	err := db.Getx(&t, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(t)
+}
+
+func main() {
+	//SingleTableQuery()
+	//SingleTableQuery1()
+	SingleTableQuery2()
+	//JoinTableQuery()
+	//JoinTableQuery2()
+	//JoinTableQuery3()
+	//JoinTableQuery4()
+}
+```
 
