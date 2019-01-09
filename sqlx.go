@@ -1,18 +1,19 @@
 package sqlx
 
 import (
+	"bytes"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
-
 	"io/ioutil"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"unicode"
 
-	"github.com/jmoiron/sqlx/reflectx"
+	"github.com/hoperuin/sqlx/reflectx"
 )
 
 // Although the NameMapper is convenient, in practice it should not
@@ -328,6 +329,201 @@ func (db *DB) Get(dest interface{}, query string, args ...interface{}) error {
 	return Get(db, dest, query, args...)
 }
 
+func (db *DB) Getx(dest interface{}, args ...interface{}) error {
+	query := buildQuery(dest, db.Mapper)
+	return Get(db, dest, query, args...)
+}
+
+type QueryBuilder interface {
+	Build() string
+}
+
+type defaultBuilder struct {
+	Mapper   *reflectx.Mapper
+	Dest     interface{}
+	TrueType reflect.Type
+}
+
+func newDefaultBuilder(dest interface{}, mapper *reflectx.Mapper) *defaultBuilder {
+	return &defaultBuilder{
+		Mapper:   mapper,
+		Dest:     dest,
+		TrueType: setType(dest),
+	}
+}
+
+func setType(dest interface{}) reflect.Type {
+	t := reflect.TypeOf(dest)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+		if t.Kind() == reflect.Slice {
+			t = t.Elem()
+		}
+	} else if t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	return t
+}
+
+func contains(source []string, value string) bool {
+	for _, v := range source {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (build *defaultBuilder) Build() string {
+	structMap := build.Mapper.TypeMap(build.TrueType)
+
+	var queryBuffer bytes.Buffer
+
+	fi := structMap.Index[0]
+	if fi.Field.Tag.Get("sql") != "" {
+		queryBuffer.WriteString(fi.Field.Tag.Get("sql"))
+	} else {
+		structName := build.TrueType.Name()
+		queryBuffer.WriteString("select ")
+
+		whereSlice := []string{}
+		selectSlice := []string{}
+		fromSlice := []string{}
+		joinSlice := []string{}
+		var tmpFrom string = strings.ToLower(structName)
+		for _, v := range structMap.Index {
+			tabTag := v.Field.Tag.Get("table")
+			if tabTag != "" {
+				if v.Field.Tag.Get("fk") != "" {
+					joinSlice = append(joinSlice, tabTag+"."+v.Field.Tag.Get("fk"))
+				}
+				if v.Field.Tag.Get("pk") != "" {
+					joinSlice = append(joinSlice, tabTag+"."+v.Field.Tag.Get("pk"))
+				}
+				if v.Embedded {
+					fromSlice = append(fromSlice, v.Path+" "+strings.ToLower(tabTag))
+					tmpFrom = v.Path
+				} else {
+					fromSlice = append(fromSlice, tabTag+" "+strings.ToLower(tabTag))
+					tmpFrom = strings.ToLower(tabTag)
+				}
+			}
+			dbTag := v.Field.Tag.Get("db")
+			if dbTag != "" {
+				if tab, ok := v.Options["table"]; ok {
+					fromSlice = append(fromSlice, tab+" "+tab)
+					ws := strings.Split(dbTag, ",")
+					selectSlice = append(selectSlice, tab+"."+ws[0])
+
+					if v.Field.Tag.Get("fk") != "" {
+						joinSlice = append(joinSlice, tab+"."+v.Field.Tag.Get("fk"))
+					}
+					if v.Field.Tag.Get("pk") != "" {
+						joinSlice = append(joinSlice, tab+"."+v.Field.Tag.Get("pk"))
+					}
+				} else if _, ok := v.Options["where"]; ok {
+					ws := strings.Split(dbTag, ",")
+					selectSlice = append(selectSlice, tmpFrom+"."+ws[0])
+				} else {
+					selectSlice = append(selectSlice, tmpFrom+"."+dbTag)
+				}
+			}
+			if opt, ok := v.Options["where"]; ok {
+				if strings.Index(opt, ":") != -1 {
+					vv := strings.Split(opt, ":")
+					switch vv[1] {
+					case "eq":
+						whereSlice = append(whereSlice, " and "+vv[0]+" = ? ")
+					case "neq":
+						whereSlice = append(whereSlice, " and "+vv[0]+" != ? ")
+					case "lt":
+						whereSlice = append(whereSlice, " and "+vv[0]+" < ? ")
+					case "lte":
+						whereSlice = append(whereSlice, " and "+vv[0]+" <= ? ")
+					case "gt":
+						whereSlice = append(whereSlice, " and "+vv[0]+" > ? ")
+					case "gte":
+						whereSlice = append(whereSlice, " and "+vv[0]+" >= ? ")
+					case "null":
+						whereSlice = append(whereSlice, " and "+vv[0]+" is null ")
+					case "notnull":
+						whereSlice = append(whereSlice, " and "+vv[0]+" is not null ? ")
+					case "like":
+						whereSlice = append(whereSlice, " and "+vv[0]+" like ? ")
+					}
+				} else {
+					whereSlice = append(whereSlice, " and "+opt+" = ? ")
+				}
+			}
+
+		}
+
+		if len(selectSlice) > 0 {
+			queryBuffer.WriteString(strings.Join(selectSlice, ","))
+		} else {
+			queryBuffer.WriteString(" * ")
+		}
+		queryBuffer.WriteString(" from ")
+		if len(fromSlice) <= 0 {
+			fromSlice = append(fromSlice, structName+" "+strings.ToLower(structName))
+		}
+		queryBuffer.WriteString(strings.Join(fromSlice, ","))
+
+		if len(joinSlice)%2 == 0 && len(joinSlice) != 0 {
+			queryBuffer.WriteString(" where ")
+			for i := 0; i < len(joinSlice); i += 2 {
+				tmpSlice := joinSlice[i : i+2]
+				if i == 0 {
+					queryBuffer.WriteString(strings.Join(tmpSlice, " = "))
+				} else {
+					queryBuffer.WriteString(" and ")
+					queryBuffer.WriteString(strings.Join(tmpSlice, " = "))
+				}
+			}
+
+		} else {
+			queryBuffer.WriteString(" where 1 = 1 ")
+		}
+
+		if len(whereSlice) > 0 {
+			queryBuffer.WriteString(strings.Join(whereSlice, " "))
+		}
+	}
+	return queryBuffer.String()
+}
+
+func underscoreName(name string) string {
+	buffer := &bytes.Buffer{}
+	for i, r := range name {
+		if unicode.IsUpper(r) {
+			if i != 0 {
+				buffer.WriteString("_")
+			}
+			buffer.WriteRune(unicode.ToLower(r))
+		} else {
+			buffer.WriteRune(r)
+		}
+	}
+
+	return buffer.String()
+}
+
+func buildQuery(dest interface{}, mapper *reflectx.Mapper) string {
+	var query string
+	if b, ok := dest.(QueryBuilder); ok {
+		query = b.Build()
+	} else {
+		build := newDefaultBuilder(dest, mapper)
+		query = build.Build()
+	}
+	return query
+}
+
+func (db *DB) Selectx(dest interface{}, args ...interface{}) error {
+	query := buildQuery(dest, db.Mapper)
+	return Select(db, dest, query, args...)
+}
+
 // MustBegin starts a transaction, and panics on error.  Returns an *sqlx.Tx instead
 // of an *sql.Tx.
 func (db *DB) MustBegin() *Tx {
@@ -427,6 +623,13 @@ func (tx *Tx) Select(dest interface{}, query string, args ...interface{}) error 
 	return Select(tx, dest, query, args...)
 }
 
+// Select within a transaction.
+// Any placeholder parameters are replaced with supplied args.
+func (tx *Tx) Selectx(dest interface{}, args ...interface{}) error {
+	query := buildQuery(dest, tx.Mapper)
+	return Select(tx, dest, query, args...)
+}
+
 // Queryx within a transaction.
 // Any placeholder parameters are replaced with supplied args.
 func (tx *Tx) Queryx(query string, args ...interface{}) (*Rows, error) {
@@ -448,6 +651,14 @@ func (tx *Tx) QueryRowx(query string, args ...interface{}) *Row {
 // Any placeholder parameters are replaced with supplied args.
 // An error is returned if the result set is empty.
 func (tx *Tx) Get(dest interface{}, query string, args ...interface{}) error {
+	return Get(tx, dest, query, args...)
+}
+
+// Get within a transaction.
+// Any placeholder parameters are replaced with supplied args.
+// An error is returned if the result set is empty.
+func (tx *Tx) Getx(dest interface{}, args ...interface{}) error {
+	query := buildQuery(dest, tx.Mapper)
 	return Get(tx, dest, query, args...)
 }
 
